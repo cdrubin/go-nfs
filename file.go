@@ -4,11 +4,11 @@ import (
 	"io"
 	"log"
 	"os"
-	"syscall"
 	"time"
 
 	"github.com/go-git/go-billy/v5"
 	"github.com/willscott/go-nfs-client/nfs/xdr"
+	"github.com/willscott/go-nfs/file"
 )
 
 // FileAttribute holds metadata about a filesystem object
@@ -111,10 +111,10 @@ func ToFileAttribute(info os.FileInfo) *FileAttribute {
 	// The number of hard links to the file.
 	f.Nlink = 1
 
-	if s, ok := info.Sys().(*syscall.Stat_t); ok {
-		f.Nlink = uint32(s.Nlink)
-		f.UID = s.Uid
-		f.GID = s.Gid
+	if a := file.GetInfo(info); a != nil {
+		f.Nlink = a.Nlink
+		f.UID = a.UID
+		f.GID = a.GID
 	}
 
 	f.Filesize = uint64(info.Size())
@@ -136,29 +136,49 @@ func tryStat(fs billy.Filesystem, path []string) *FileAttribute {
 }
 
 // WriteWcc writes the `wcc_data` representation of an object.
-func WriteWcc(writer io.Writer, pre *FileCacheAttribute, post *FileAttribute) {
+func WriteWcc(writer io.Writer, pre *FileCacheAttribute, post *FileAttribute) error {
 	if pre == nil {
-		_ = xdr.Write(writer, uint32(0))
+		if err := xdr.Write(writer, uint32(0)); err != nil {
+			return err
+		}
 	} else {
-		_ = xdr.Write(writer, uint32(1))
-		_ = xdr.Write(writer, *pre)
+		if err := xdr.Write(writer, uint32(1)); err != nil {
+			return err
+		}
+		if err := xdr.Write(writer, *pre); err != nil {
+			return err
+		}
 	}
 	if post == nil {
-		_ = xdr.Write(writer, uint32(0))
+		if err := xdr.Write(writer, uint32(0)); err != nil {
+			return err
+		}
 	} else {
-		_ = xdr.Write(writer, uint32(1))
-		_ = xdr.Write(writer, *post)
+		if err := xdr.Write(writer, uint32(1)); err != nil {
+			return err
+		}
+		if err := xdr.Write(writer, *post); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // WritePostOpAttrs writes the `post_op_attr` representation of a files attributes
-func WritePostOpAttrs(writer io.Writer, post *FileAttribute) {
+func WritePostOpAttrs(writer io.Writer, post *FileAttribute) error {
 	if post == nil {
-		_ = xdr.Write(writer, uint32(0))
+		if err := xdr.Write(writer, uint32(0)); err != nil {
+			return err
+		}
 	} else {
-		_ = xdr.Write(writer, uint32(1))
-		_ = xdr.Write(writer, *post)
+		if err := xdr.Write(writer, uint32(1)); err != nil {
+			return err
+		}
+		if err := xdr.Write(writer, *post); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // SetFileAttributes represents a command to update some metadata
@@ -185,7 +205,7 @@ func (s *SetFileAttributes) Apply(changer billy.Change, fs billy.Filesystem, fil
 		mode := os.FileMode(*s.SetMode) & os.ModePerm
 		if mode != curr.Mode().Perm() {
 			if changer == nil {
-				return &NFSStatusError{NFSStatusNotSupp}
+				return &NFSStatusError{NFSStatusNotSupp, os.ErrPermission}
 			}
 			if err := changer.Chmod(file, mode); err != nil {
 				return err
@@ -203,7 +223,7 @@ func (s *SetFileAttributes) Apply(changer billy.Change, fs billy.Filesystem, fil
 		}
 		if euid != curr.UID || egid != curr.GID {
 			if changer == nil {
-				return &NFSStatusError{NFSStatusNotSupp}
+				return &NFSStatusError{NFSStatusNotSupp, os.ErrPermission}
 			}
 			if err := changer.Lchown(file, int(euid), int(egid)); err != nil {
 				return err
@@ -212,7 +232,7 @@ func (s *SetFileAttributes) Apply(changer billy.Change, fs billy.Filesystem, fil
 	}
 	if s.SetSize != nil {
 		if curr.Mode()&os.ModeSymlink != 0 {
-			return &NFSStatusError{NFSStatusNotSupp}
+			return &NFSStatusError{NFSStatusNotSupp, os.ErrInvalid}
 		}
 		fp, err := fs.Open(file)
 		if err != nil {
@@ -237,7 +257,7 @@ func (s *SetFileAttributes) Apply(changer billy.Change, fs billy.Filesystem, fil
 		}
 		if atime != curr.Atime.Native() || mtime != curr.Mtime.Native() {
 			if changer == nil {
-				return &NFSStatusError{NFSStatusNotSupp}
+				return &NFSStatusError{NFSStatusNotSupp, os.ErrPermission}
 			}
 			if err := changer.Chtimes(file, *atime, *mtime); err != nil {
 				return err
